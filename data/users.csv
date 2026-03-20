@@ -1,0 +1,4 @@
+username,password_hash,role
+admin,$2b$12$U9vh.Ip55jFCCrADxxtifegMDznXOxr4lkRO0dCBOLRWBxqLt5EEK,admin
+user,$2b$12$xc7.4IPHfjGowK9f/VBtHORiMUsDeXGnO8enocGF9PUbLqd5V3k3O,user
+tejas.s,$2b$12$rVX0QJ.FUSTRlQJarIgMZOIOC9WQ0dTLCSsr/zzu2MWJpk2v7MjMm,user

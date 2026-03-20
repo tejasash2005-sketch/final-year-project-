@@ -1,0 +1,17 @@
+
+body {
+    background: linear-gradient(135deg,#020617,#0f172a);
+    color:white;
+}
+.glass {
+    background: rgba(255,255,255,0.05);
+    backdrop-filter: blur(15px);
+    padding:20px;
+    border-radius:15px;
+    margin-bottom:20px;
+}
+.stButton>button {
+    background: linear-gradient(90deg,#6366f1,#9333ea);
+    color:white;
+    border-radius:10px;
+}
