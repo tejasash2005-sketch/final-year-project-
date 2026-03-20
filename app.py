@@ -173,40 +173,95 @@ def save_file(file):
     with open(path,"wb") as f:
         f.write(file.getbuffer())
     return h+"_"+name
-
 # ---------------- MAIN ----------------
 if st.session_state.login:
 
-    if st.session_state.role=="user":
+    if st.session_state.role == "user":
 
-        st.markdown(f"## Welcome {st.session_state.user} 👋")
+        # -------- HEADER --------
+        st.markdown(
+            """
+            <style>
+            .header-container {
+                text-align: top;
+                padding: 25px;
+                border-radius: 15px;
+                background: linear-gradient(135deg, #0f172a, #1e293b);
+                color: white;
+                box-shadow: 0px 10px 30px rgba(0,0,0,0.5);
+                animation: fadeIn 1.2s ease-in-out;
+            }
 
-        # Sidebar inputs
+            .title {
+                font-size: 36px;
+                font-weight: 700;
+                animation: slideDown 1s ease-in-out;
+            }
+
+            .subtitle {
+                font-size: 18px;
+                opacity: 0.8;
+                animation: fadeIn 2s ease-in-out;
+            }
+
+            @keyframes fadeIn {
+                from {opacity: 0;}
+                to {opacity: 1;}
+            }
+
+            @keyframes slideDown {
+                from {
+                    transform: translateY(-30px);
+                    opacity: 0;
+                }
+                to {
+                    transform: translateY(0);
+                    opacity: 1;
+                }
+            }
+            </style>
+
+            <div class="header-container">
+                <div class="title">🏦 Bank Loan Approval Prediction System</div>
+                <div class="subtitle">AI-powered Loan Analysis & Risk Prediction</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.markdown(f"### 👋 Welcome {st.session_state.user}")
+
+        # -------- SIDEBAR --------
         st.sidebar.title("📊 Loan Features")
         features = {}
+
         for f in FEATURE_LABELS:
             features[f] = st.sidebar.number_input(f, value=1000.0)
 
-        # Personal Info
+        # -------- PERSONAL INFO --------
         st.subheader("👤 Personal Info")
-        c1,c2,c3,c4 = st.columns(4)
+        c1, c2, c3, c4 = st.columns(4)
+
         name = c1.text_input("Name", key="name")
-        age = c2.number_input("Age",18,100,25, key="age")
-        gender = c3.selectbox("Gender",["Male","Female"], key="gender")
+        age = c2.number_input("Age", 18, 100, 25, key="age")
+        gender = c3.selectbox("Gender", ["Male", "Female"], key="gender")
         nationality = c4.text_input("Nationality", key="nat")
-        marital = st.selectbox("Marital Status",["Single","Married"], key="marital")
 
-        # Loan
+        marital = st.selectbox("Marital Status", ["Single", "Married"], key="marital")
+
+        # -------- LOAN --------
         loan_type = st.selectbox("Loan Type", list(LOAN_PACKAGES.keys()))
-        credit_score = st.slider("Credit Score",300,900,700)
+        credit_score = st.slider("Credit Score", 300, 900, 700)
 
-        # Uploads
+        # -------- DOCUMENTS --------
         st.subheader("📄 Documents")
+
         aadhaar = st.file_uploader("Aadhaar", key="aadhaar")
         pan = st.file_uploader("PAN", key="pan")
         credit = st.file_uploader("Credit Report", key="credit")
         bank = st.file_uploader("Bank Statement", key="bank")
 
+        # -------- APPLY LOAN --------
         if st.button("Apply Loan"):
 
             X = np.array([list(features.values())])
@@ -218,77 +273,97 @@ if st.session_state.login:
                 pred = 1
 
             rate, tenure = LOAN_PACKAGES[loan_type]
-            r = rate/12
+            r = rate / 12
             loan_amt = features["Loan Amount"]
 
-            EMI = round(loan_amt*r*(1+r)**tenure/((1+r)**tenure-1),2)
+            EMI = round(loan_amt * r * (1 + r) ** tenure / ((1 + r) ** tenure - 1), 2)
 
-            risk = "Low" if credit_score>750 else "Medium" if credit_score>650 else "High"
-            fraud = IsolationForest().fit(np.random.rand(50,4)).predict([X[0][:4]])[0]==-1
+            risk = "Low" if credit_score > 750 else "Medium" if credit_score > 650 else "High"
 
-            new_row = {col:features[col] for col in FEATURE_LABELS}
+            fraud = IsolationForest().fit(np.random.rand(50, 4)).predict([X[0][:4]])[0] == -1
+
+            new_row = {col: features[col] for col in FEATURE_LABELS}
+
             new_row.update({
-                "Name":name,"Age":age,"Gender":gender,
-                "Nationality":nationality,"Marital Status":marital,
-                "Aadhaar":save_file(aadhaar),
-                "PAN":save_file(pan),
-                "CreditFile":save_file(credit),
-                "BankFile":save_file(bank),
-                "Prediction":pred,"Risk":risk,"Fraud":fraud,
-                "EMI":EMI,"Loan Type":loan_type,
-                "Loan Status":"Under Review","Credit Score":credit_score
+                "Name": name,
+                "Age": age,
+                "Gender": gender,
+                "Nationality": nationality,
+                "Marital Status": marital,
+                "Aadhaar": save_file(aadhaar),
+                "PAN": save_file(pan),
+                "CreditFile": save_file(credit),
+                "BankFile": save_file(bank),
+                "Prediction": pred,
+                "Risk": risk,
+                "Fraud": fraud,
+                "EMI": EMI,
+                "Loan Type": loan_type,
+                "Loan Status": "Under Review",
+                "Credit Score": credit_score
             })
 
             df_app = pd.concat([df_app, pd.DataFrame([new_row])], ignore_index=True)
-            df_app.to_csv(APPLICANT_CSV,index=False)
+            df_app.to_csv(APPLICANT_CSV, index=False)
 
             st.success("Loan Applied ✅")
 
-            # EMI Schedule
+            # -------- EMI SCHEDULE --------
             st.subheader("📅 EMI Plan")
+
             bal = loan_amt
-            schedule=[]
-            for m in range(1,tenure+1):
-                interest = bal*r
+            schedule = []
+
+            for m in range(1, tenure + 1):
+                interest = bal * r
                 principal = EMI - interest
                 bal -= principal
-                schedule.append([m,EMI,principal,interest,bal])
+                schedule.append([m, EMI, principal, interest, bal])
 
-            st.dataframe(pd.DataFrame(schedule,columns=["Month","EMI","Principal","Interest","Balance"]))
+            st.dataframe(pd.DataFrame(schedule, columns=["Month", "EMI", "Principal", "Interest", "Balance"]))
 
-        # -------- CHARTS (SMALL + COLORFUL) --------
-        st.subheader("📊 Analytics")
+         # ================= CHARTS (INSIDE USER BLOCK) =================
+        st.subheader("📊 Loan Analytics & Predictions")
 
-        c1,c2,c3 = st.columns(3)
+        c1, c2, c3 = st.columns(3)
 
         c1.plotly_chart(px.pie(df_app, names="Loan Type",
-                              color_discrete_sequence=px.colors.sequential.Rainbow),
+                               title="📌 Loan Type Prediction Distribution",
+                               color_discrete_sequence=px.colors.sequential.Rainbow),
                         use_container_width=True)
 
         c2.plotly_chart(px.histogram(df_app, x="Risk",
-                                    color="Risk",
-                                    color_discrete_sequence=px.colors.qualitative.Bold),
+                                     color="Risk",
+                                     title="⚠️ Risk Prediction Distribution",
+                                     color_discrete_sequence=px.colors.qualitative.Bold),
                         use_container_width=True)
 
         c3.plotly_chart(px.scatter(df_app, x="Total Income", y="Loan Amount",
-                                  color="Credit Score",
-                                  color_continuous_scale="Turbo"),
+                                   color="Credit Score",
+                                   title="💰 Loan Approval Prediction vs Income",
+                                   color_continuous_scale="Turbo"),
                         use_container_width=True)
 
-        c4,c5,c6 = st.columns(3)
+        c4, c5, c6 = st.columns(3)
 
         c4.plotly_chart(px.bar(df_app, x="Loan Type",
-                              color="Loan Type",
-                              color_discrete_sequence=px.colors.qualitative.Vivid),
+                               color="Loan Type",
+                               title="📊 Loan Type Prediction Count",
+                               color_discrete_sequence=px.colors.qualitative.Vivid),
                         use_container_width=True)
 
         c5.plotly_chart(px.box(df_app, y="Credit Score",
-                              color="Loan Type"),
+                               color="Loan Type",
+                               title="📈 Credit Score Prediction Spread"),
                         use_container_width=True)
 
-        c6.plotly_chart(px.imshow(df_app.select_dtypes(include=np.number).corr(),
-                                 color_continuous_scale="Plasma"),
+        numeric_corr = df_app.select_dtypes(include=np.number).corr()
+
+        c6.plotly_chart(px.imshow(numeric_corr,
+                                  title="🔗 Feature Correlation (Model Insight)",
+                                  color_continuous_scale="Plasma"),
                         use_container_width=True)
+
 
     else:
 
@@ -304,3 +379,90 @@ if st.session_state.login:
                 df_app.at[i,"Loan Status"]="Approved"
 
         df_app.to_csv(APPLICANT_CSV,index=False)
+        
+# ==============================
+# 💎 REAL FINTECH CARD (UPDATED)
+# ==============================
+
+if st.session_state.login and st.session_state.role == "user":
+
+    user_df = df_app[df_app["Name"] == st.session_state.user]
+
+    if not user_df.empty:
+
+        latest = user_df.iloc[-1]
+
+        with st.container():
+
+            st.markdown("""
+            <style>
+            .stContainer {
+                background: linear-gradient(135deg,#0f172a,#1e293b);
+                padding: 20px;
+                border-radius: 20px;
+                box-shadow: 0px 15px 40px rgba(0,0,0,0.6);
+                margin-top: 20px;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            st.markdown("### 💳 Loan Dashboard")
+
+            # -------- TOP METRICS --------
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric("💰 Loan Amount", f"₹ {latest.get('Loan Amount','N/A')}")
+            c2.metric("📆 EMI", f"₹ {latest.get('EMI','N/A')}")
+            c3.metric("📊 Credit Score", f"{latest.get('Credit Score','N/A')}")
+
+            # -------- LOAN INFO --------
+            st.markdown("#### 📄 Loan Info")
+            col1, col2, col3 = st.columns(3)
+
+            col1.info(f"Loan Type: {latest.get('Loan Type','N/A')}")
+            col2.success(f"Status: {latest.get('Loan Status','N/A')}")
+            col3.warning(f"Risk: {latest.get('Risk','N/A')}")
+
+            # -------- LINE CHARTS (USING ALL FEATURES) --------
+            st.markdown("#### 📊 Loan Feature Trends")
+
+            # Prepare data
+            feature_cols = [col for col in df_app.columns if col not in ["Name","Loan Status"]]
+
+            numeric_df = df_app[feature_cols].select_dtypes(include=np.number)
+
+            # Chart 1: Multi-feature trend
+            st.plotly_chart(
+                px.line(
+                    numeric_df,
+                    title="All Loan Features Trend (Multi-Line)",
+                    labels={"value":"Value","index":"Record"}
+                ),
+                use_container_width=True
+            )
+
+            # Chart 2: Latest vs Average comparison
+            avg_values = numeric_df.mean()
+
+            compare_df = pd.DataFrame({
+                "Feature": avg_values.index,
+                "Average": avg_values.values,
+                "Latest": numeric_df.iloc[-1].values if not numeric_df.empty else []
+            })
+
+            compare_df = compare_df.melt(id_vars="Feature", var_name="Type", value_name="Value")
+
+            st.plotly_chart(
+                px.line(
+                    compare_df,
+                    x="Feature",
+                    y="Value",
+                    color="Type",
+                    markers=True,
+                    title="Latest vs Average Feature Comparison"
+                ),
+                use_container_width=True
+            )
+
+    else:
+        st.info("Apply loan to see dashboard")
