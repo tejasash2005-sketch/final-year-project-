@@ -6,7 +6,10 @@ import os
 import bcrypt
 import hashlib
 import time
-from datetime import datetime
+import random
+import json
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 from sklearn.ensemble import IsolationForest
 import plotly.express as px
 import plotly.graph_objects as go
@@ -101,6 +104,38 @@ input, select, textarea {
     box-shadow: 0 0 40px #ff440033, inset 0 0 60px #ff220011;
     margin-bottom: 20px;
 }
+.kyc-section {
+    background: linear-gradient(135deg, #001a00, #002b00, #001a0a, #000f05);
+    border: 1px solid #00ff8888;
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: 0 0 40px #00ff4433, inset 0 0 60px #00aa4411;
+    margin-bottom: 20px;
+}
+.payment-section {
+    background: linear-gradient(135deg, #1a1a00, #2b2b00, #1a1500, #0f0d00);
+    border: 1px solid #ffff0088;
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: 0 0 40px #ffff0033, inset 0 0 60px #aaaa0011;
+    margin-bottom: 20px;
+}
+.gateway-section {
+    background: linear-gradient(135deg, #001133, #002255, #001a44, #000d22);
+    border: 1px solid #3399ff88;
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: 0 0 40px #3399ff33, inset 0 0 60px #002266aa;
+    margin-bottom: 20px;
+}
+.receipt-card {
+    background: linear-gradient(135deg, #002200, #003300, #001a00);
+    border: 2px solid #00ff88;
+    border-radius: 20px;
+    padding: 24px;
+    box-shadow: 0 0 30px #00ff4444;
+    margin-bottom: 15px;
+}
 .lc-step {
     display: flex;
     align-items: center;
@@ -115,6 +150,10 @@ input, select, textarea {
 .done-step   { background:#00ff8811; border-color:#00ff88; color:#00ff88; }
 .active-step { background:#ffff0011; border-color:#ffff00; color:#ffff00; }
 .wait-step   { background:#ffffff08; border-color:#444; color:#888; }
+.overdue-emi { background:#ff000011; border:1px solid #ff0000aa; border-radius:10px; padding:8px 14px; color:#ff6666; }
+.due-emi     { background:#ffaa0011; border:1px solid #ffaa00aa; border-radius:10px; padding:8px 14px; color:#ffcc44; }
+.paid-emi    { background:#00ff8811; border:1px solid #00ff88aa; border-radius:10px; padding:8px 14px; color:#00ff88; }
+.upcoming-emi{ background:#3399ff11; border:1px solid #3399ffaa; border-radius:10px; padding:8px 14px; color:#66bbff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -126,8 +165,10 @@ MDL_DIR  = os.path.join(BASE_DIR, "models")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(UPL_DIR, exist_ok=True)
 
-USERS_FILE = os.path.join(DATA_DIR, "users.csv")
-LOANS_FILE = os.path.join(DATA_DIR, "loan.csv")
+USERS_FILE    = os.path.join(DATA_DIR, "users.csv")
+LOANS_FILE    = os.path.join(DATA_DIR, "loan.csv")
+PAYMENTS_FILE = os.path.join(DATA_DIR, "payments.csv")
+KYC_FILE      = os.path.join(DATA_DIR, "kyc.csv")
 
 # create default users if not exist
 if not os.path.exists(USERS_FILE):
@@ -138,6 +179,20 @@ if not os.path.exists(USERS_FILE):
     pd.DataFrame(default_users).to_csv(USERS_FILE, index=False)
 
 users_df = pd.read_csv(USERS_FILE)
+
+# init payments file
+PAYMENT_COLS = ["Username", "Loan_Index", "Month", "Due_Date", "Paid_Date",
+                "Principal", "Interest", "EMI_Amount", "Late_Fee", "Total_Paid",
+                "Payment_Method", "Transaction_ID", "Status"]
+if not os.path.exists(PAYMENTS_FILE):
+    pd.DataFrame(columns=PAYMENT_COLS).to_csv(PAYMENTS_FILE, index=False)
+
+# init kyc file
+KYC_COLS = ["Username", "Phone", "OTP_Verified", "Selfie_Uploaded",
+            "Account_Number", "IFSC_Code", "Bank_Name", "KYC_Status",
+            "Verified_At"]
+if not os.path.exists(KYC_FILE):
+    pd.DataFrame(columns=KYC_COLS).to_csv(KYC_FILE, index=False)
 
 # all feature names the model uses
 FEATURES = [
@@ -182,11 +237,12 @@ except:
 
 # all columns for loans csv
 ALL_COLS = FEATURES + [
-    "Name", "Age", "Gender", "Nationality", "Marital Status",
+    "Username", "Name", "Age", "Gender", "Nationality", "Marital Status",
     "Aadhaar", "PAN", "CreditFile", "BankFile",
     "Prediction", "Risk", "Fraud", "EMI", "Loan Type", "Loan Status",
     "Credit Score", "Applied Date", "Last Updated",
-    "Lifecycle Stage", "Approval Probability", "Explainability"
+    "Lifecycle Stage", "Approval Probability", "Explainability",
+    "EMI_Day", "Disbursement_Date", "Account_Number", "Bank_Name", "IFSC_Code"
 ]
 
 if not os.path.exists(LOANS_FILE):
@@ -198,11 +254,17 @@ for c in ALL_COLS:
         loans_df[c] = None
 
 # session defaults
-for k, v in [("login", False), ("role", ""), ("username", ""), ("show_adv", False)]:
+for k, v in [
+    ("login", False), ("role", ""), ("username", ""),
+    ("show_adv", False), ("otp_sent", False), ("otp_code", ""),
+    ("otp_verified", False), ("kyc_step", 1),
+    ("payment_gateway_open", False), ("last_receipt", None)
+]:
     if k not in st.session_state:
         st.session_state[k] = v
 
-# helper - check login
+# ===================== HELPER FUNCTIONS =====================
+
 def check_login(u, p):
     if u in users_df["username"].values:
         row = users_df[users_df["username"] == u].iloc[0]
@@ -210,7 +272,6 @@ def check_login(u, p):
             return True, row["role"]
     return False, None
 
-# helper - register new user
 def add_user(u, p):
     if u in users_df["username"].values:
         return False
@@ -219,7 +280,6 @@ def add_user(u, p):
         USERS_FILE, mode="a", header=False, index=False)
     return True
 
-# helper - save uploaded file to disk
 def store_upload(f):
     if f is None:
         return ""
@@ -229,14 +289,12 @@ def store_upload(f):
         out.write(f.getbuffer())
     return uid + "_" + f.name
 
-# emi calc
 def emi_calc(principal, annual_rate, months):
     r = annual_rate / 12
     if r == 0:
         return round(principal / months, 2)
     return round(principal * r * (1+r)**months / ((1+r)**months - 1), 2)
 
-# chart layout helper
 def chart_style(title, bg="#000a1e", tc="#5599ff"):
     return dict(
         title=dict(text=title, font=dict(color=tc, size=13, family="Orbitron")),
@@ -252,7 +310,6 @@ def chart_style(title, bg="#000a1e", tc="#5599ff"):
         hovermode="x unified"
     )
 
-# lifecycle stage list
 LC_STEPS = [
     ("Application Submitted", "📋"),
     ("Document Verification", "🔍"),
@@ -285,7 +342,6 @@ def render_lifecycle(cur_idx):
     html += "</div>"
     return html
 
-# explainability scores based on inputs
 def get_explain_scores(feat_vals, cscore, lamount):
     scores = {
         "Credit Score":         cscore / 900,
@@ -298,6 +354,80 @@ def get_explain_scores(feat_vals, cscore, lamount):
         "Loan-to-Income Ratio": 1 - min(feat_vals.get("Loan-to-Income Ratio", 2) / 10, 1),
     }
     return scores
+
+def generate_otp():
+    return str(random.randint(100000, 999999))
+
+def get_emi_due_dates(disbursement_date_str, emi_day, num_months):
+    """Generate list of due dates for each EMI month."""
+    try:
+        base = datetime.strptime(disbursement_date_str[:10], "%Y-%m-%d")
+    except:
+        base = datetime.now()
+    dates = []
+    for m in range(1, num_months + 1):
+        due = base + relativedelta(months=m)
+        due = due.replace(day=min(emi_day, 28))
+        dates.append(due)
+    return dates
+
+def get_emi_status(due_date):
+    today = datetime.now().date()
+    due   = due_date.date() if hasattr(due_date, 'date') else due_date
+    if today > due:
+        return "Overdue"
+    elif today == due:
+        return "Due Today"
+    elif (due - today).days <= 7:
+        return "Due Soon"
+    else:
+        return "Upcoming"
+
+def calc_late_fee(due_date, rate_per_day=50):
+    today = datetime.now().date()
+    due   = due_date.date() if hasattr(due_date, 'date') else due_date
+    days_late = (today - due).days
+    return max(0, days_late * rate_per_day)
+
+def load_payments():
+    df = pd.read_csv(PAYMENTS_FILE)
+    for c in PAYMENT_COLS:
+        if c not in df.columns:
+            df[c] = None
+    return df
+
+def load_kyc():
+    df = pd.read_csv(KYC_FILE)
+    for c in KYC_COLS:
+        if c not in df.columns:
+            df[c] = None
+    return df
+
+def get_user_kyc(username):
+    df = load_kyc()
+    rows = df[df["Username"] == username]
+    if rows.empty:
+        return None
+    return rows.iloc[-1]
+
+def save_kyc(record: dict):
+    df = load_kyc()
+    df = df[df["Username"] != record["Username"]]
+    df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
+    df.to_csv(KYC_FILE, index=False)
+
+def cyber_theme(fig):
+    fig.update_layout(
+        paper_bgcolor="#050d1a",
+        plot_bgcolor="#050d1a",
+        font=dict(color="#00ffe0", size=12),
+        xaxis=dict(showgrid=True, gridcolor="rgba(0,255,224,0.2)",
+                   zeroline=False, color="#00ffe0"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(0,255,224,0.2)",
+                   zeroline=False, color="#00ffe0"),
+        legend=dict(font=dict(color="#00ffe0"))
+    )
+    return fig
 
 # ===================== LOGIN PAGE =====================
 if not st.session_state.login:
@@ -315,7 +445,7 @@ if not st.session_state.login:
             else:
                 st.error("Wrong username or password")
     with t2:
-        nu = st.text_input("Pick a Username")
+        nu  = st.text_input("Pick a Username")
         np_ = st.text_input("Pick a Password", type="password")
         if st.button("Create Account"):
             if add_user(nu, np_):
@@ -327,11 +457,365 @@ if not st.session_state.login:
 # ===================== USER SECTION =====================
 if st.session_state.login and st.session_state.role == "user":
     menu = st.sidebar.radio("📂 Navigation", [
-    "🏠 Loan Application",
-    "📄 Loan Details (Real Bank View)"
-        ])
-    if menu == "🏠 Loan Application":
+        "🏠 Loan Application",
+        "🔐 KYC Verification",
+        "💳 EMI Payment Center",
+        "📄 Loan Details (Real Bank View)"
+    ])
 
+    # =====================================================================
+    # PAGE: KYC VERIFICATION
+    # =====================================================================
+    if menu == "🔐 KYC Verification":
+        st.title("🔐 KYC — Know Your Customer")
+        st.markdown("Complete your KYC to enable loan disbursement to your bank account.")
+
+        kyc_rec = get_user_kyc(st.session_state.username)
+        kyc_verified = kyc_rec is not None and str(kyc_rec.get("KYC_Status", "")) == "Verified"
+
+        if kyc_verified:
+            st.success(f"✅ KYC Verified on {kyc_rec.get('Verified_At', 'N/A')}")
+            st.markdown(f"""
+            <div class='kyc-section'>
+            <h3 style='color:#00ff88!important;'>✅ KYC Summary</h3>
+            <p>📱 Phone: {kyc_rec.get('Phone','N/A')} &nbsp;|&nbsp; ✔ OTP: {'Verified' if kyc_rec.get('OTP_Verified') else 'No'}</p>
+            <p>🏦 Bank: {kyc_rec.get('Bank_Name','N/A')} &nbsp;|&nbsp; IFSC: {kyc_rec.get('IFSC_Code','N/A')}</p>
+            <p>💳 Account: {'*'*8 + str(kyc_rec.get('Account_Number',''))[-4:] if kyc_rec.get('Account_Number') else 'N/A'}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("🔄 Re-do KYC"):
+                kyc_verified = False
+                st.session_state.otp_verified = False
+                st.session_state.otp_sent     = False
+                st.session_state.otp_code     = ""
+                st.rerun()
+        else:
+            st.markdown('<div class="kyc-section">', unsafe_allow_html=True)
+
+            # ---- STEP 1: Phone + OTP ----
+            st.markdown("### 📱 Step 1 — Phone Verification")
+            phone_in = st.text_input("Enter Mobile Number", max_chars=10, placeholder="10-digit number")
+
+            col_s1, col_s2 = st.columns(2)
+            if col_s1.button("📨 Send OTP"):
+                if len(phone_in) == 10 and phone_in.isdigit():
+                    otp = generate_otp()
+                    st.session_state.otp_code = otp
+                    st.session_state.otp_sent = True
+                    st.success(f"✅ OTP sent to +91-{phone_in}  (Demo OTP: **{otp}**)")
+                else:
+                    st.error("Enter a valid 10-digit number.")
+
+            if st.session_state.otp_sent and not st.session_state.otp_verified:
+                otp_in = st.text_input("Enter OTP", max_chars=6, placeholder="6-digit OTP")
+                if col_s2.button("✔ Verify OTP"):
+                    if otp_in == st.session_state.otp_code:
+                        st.session_state.otp_verified = True
+                        st.success("✅ OTP Verified Successfully!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Incorrect OTP. Try again.")
+
+            if st.session_state.otp_verified:
+                st.success("✅ Phone Verified")
+
+            st.markdown("---")
+
+            # ---- STEP 2: Selfie Upload ----
+            st.markdown("### 🤳 Step 2 — Face Verification (Selfie)")
+            selfie_f = st.file_uploader("Upload a clear selfie / photo for face verification",
+                                        type=["jpg","jpeg","png"], key="selfie_up")
+            selfie_ok = selfie_f is not None
+            if selfie_ok:
+                st.image(selfie_f, caption="Uploaded Photo", width=200)
+                st.success("✅ Selfie uploaded. (Face match: Demo mode — auto-passed)")
+
+            st.markdown("---")
+
+            # ---- STEP 3: Bank Account ----
+            st.markdown("### 🏦 Step 3 — Bank Account Details")
+            st.info("Loan amount will be credited to this account after approval.")
+            ba_col1, ba_col2 = st.columns(2)
+            acc_num   = ba_col1.text_input("Account Number", max_chars=18)
+            ifsc_code = ba_col2.text_input("IFSC Code", max_chars=11, placeholder="e.g. SBIN0001234")
+            bank_name = st.selectbox("Bank Name", [
+                "State Bank of India", "HDFC Bank", "ICICI Bank",
+                "Axis Bank", "Punjab National Bank", "Bank of Baroda",
+                "Canara Bank", "Kotak Mahindra Bank", "Yes Bank",
+                "IndusInd Bank", "Union Bank", "Other"
+            ])
+
+            st.markdown("---")
+
+            # ---- SUBMIT KYC ----
+            if st.button("🚀 Submit KYC", key="submit_kyc"):
+                errs = []
+                if not st.session_state.otp_verified:
+                    errs.append("Phone OTP not verified.")
+                if not selfie_ok:
+                    errs.append("Selfie not uploaded.")
+                if not acc_num or len(acc_num) < 9:
+                    errs.append("Enter valid account number.")
+                if not ifsc_code or len(ifsc_code) < 11:
+                    errs.append("Enter valid IFSC code (11 chars).")
+
+                if errs:
+                    for e in errs:
+                        st.error(f"❌ {e}")
+                else:
+                    rec = {
+                        "Username":       st.session_state.username,
+                        "Phone":          phone_in,
+                        "OTP_Verified":   True,
+                        "Selfie_Uploaded": store_upload(selfie_f),
+                        "Account_Number": acc_num,
+                        "IFSC_Code":      ifsc_code.upper(),
+                        "Bank_Name":      bank_name,
+                        "KYC_Status":     "Verified",
+                        "Verified_At":    datetime.now().strftime("%Y-%m-%d %H:%M")
+                    }
+                    save_kyc(rec)
+                    st.success("🎉 KYC Verified Successfully!")
+                    st.balloons()
+                    st.rerun()
+
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    # =====================================================================
+    # PAGE: EMI PAYMENT CENTER
+    # =====================================================================
+    elif menu == "💳 EMI Payment Center":
+        st.title("💳 EMI Payment Center")
+
+        loans_df = pd.read_csv(LOANS_FILE)
+        for c in ALL_COLS:
+            if c not in loans_df.columns:
+                loans_df[c] = None
+
+        user_loans = loans_df[loans_df["Username"] == st.session_state.username]
+
+        if user_loans.empty:
+            st.warning("No loan applications found. Apply for a loan first.")
+            st.stop()
+
+        # pick loan
+        loan_options = [f"Loan #{i} — {row['Loan Type']} — ₹{row['Loan Amount']:,} — {row['Loan Status']}"
+                        for i, row in user_loans.iterrows()]
+        sel_loan_lbl = st.selectbox("Select Loan", loan_options)
+        sel_idx = int(sel_loan_lbl.split("#")[1].split(" ")[0])
+        sel_loan = loans_df.iloc[sel_idx]
+
+        ltype   = str(sel_loan.get("Loan Type", "Personal Loan"))
+        rate, t = LOANS.get(ltype, (0.12, 24))
+        l_amt   = float(sel_loan.get("Loan Amount", 0) or 0)
+        emi_amt = float(sel_loan.get("EMI", emi_calc(l_amt, rate, int(t))) or 0)
+        emi_day = int(sel_loan.get("EMI_Day", 5) or 5)
+        disb_dt = str(sel_loan.get("Disbursement_Date", sel_loan.get("Applied Date", datetime.now().strftime("%Y-%m-%d"))) or datetime.now().strftime("%Y-%m-%d"))
+
+        # load payments for this loan
+        pay_df = load_payments()
+        my_pays = pay_df[(pay_df["Username"] == st.session_state.username) &
+                         (pay_df["Loan_Index"] == sel_idx)]
+
+        paid_months = set(my_pays["Month"].astype(int).tolist())
+
+        # generate schedule
+        due_dates = get_emi_due_dates(disb_dt, emi_day, int(t))
+
+        bal_run = l_amt
+        r_mo    = rate / 12
+        sched_rows = []
+        for mo in range(1, int(t)+1):
+            int_p = bal_run * r_mo
+            pri_p = emi_amt - int_p
+            bal_run = max(bal_run - pri_p, 0)
+            due = due_dates[mo-1]
+            status = "Paid" if mo in paid_months else get_emi_status(due)
+            late_fee = 0 if mo in paid_months else calc_late_fee(due)
+            sched_rows.append({
+                "Month":         mo,
+                "Due Date":      due.strftime("%Y-%m-%d"),
+                "EMI (₹)":       round(emi_amt, 2),
+                "Principal (₹)": round(pri_p, 2),
+                "Interest (₹)":  round(int_p, 2),
+                "Balance (₹)":   round(bal_run, 2),
+                "Late Fee (₹)":  late_fee,
+                "Status":        status,
+            })
+
+        sched_df = pd.DataFrame(sched_rows)
+
+        # summary metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("💰 Total Loan",   f"₹ {l_amt:,.0f}")
+        m2.metric("📆 Monthly EMI",  f"₹ {emi_amt:,.2f}")
+        m3.metric("✅ EMIs Paid",     f"{len(paid_months)} / {int(t)}")
+        overdue_c = len(sched_df[(sched_df["Status"] == "Overdue") & (~sched_df["Month"].isin(paid_months))])
+        m4.metric("⚠️ Overdue EMIs", str(overdue_c))
+
+        # ---- UPCOMING / OVERDUE EMIs ----
+        st.markdown('<div class="payment-section">', unsafe_allow_html=True)
+        st.markdown("<h3 style='color:#ffff00!important;text-shadow:0 0 15px #ffaa00;'>📅 EMI Status Board</h3>", unsafe_allow_html=True)
+
+        upcoming_rows = sched_df[sched_df["Status"].isin(["Upcoming","Due Today","Due Soon","Overdue"])].head(6)
+
+        if upcoming_rows.empty:
+            st.success("🎉 All EMIs up to date!")
+        else:
+            for _, row in upcoming_rows.iterrows():
+                mo       = int(row["Month"])
+                st_cls   = {"Overdue":"overdue-emi","Due Today":"due-emi","Due Soon":"due-emi"}.get(row["Status"], "upcoming-emi")
+                late_lbl = f" | 🔴 Late Fee: ₹{row['Late Fee (₹)']}" if row["Late Fee (₹)"] > 0 else ""
+                st.markdown(
+                    f"<div class='{st_cls}'>Month {mo} — Due: {row['Due Date']} — EMI: ₹{row['EMI (₹)']:,} {late_lbl} — <b>{row['Status']}</b></div>",
+                    unsafe_allow_html=True
+                )
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # ---- PAYMENT GATEWAY ----
+        st.markdown('<div class="gateway-section">', unsafe_allow_html=True)
+        st.markdown("<h3 style='color:#66bbff!important;text-shadow:0 0 15px #3399ff;'>🏦 Payment Gateway</h3>", unsafe_allow_html=True)
+
+        unpaid_months = sched_df[~sched_df["Month"].isin(paid_months)]
+        unpaid_options = [f"Month {int(r['Month'])} — Due {r['Due Date']} — ₹{r['EMI (₹)']+r['Late Fee (₹)']:,.2f}"
+                          for _, r in unpaid_months.iterrows()]
+
+        if unpaid_options:
+            sel_emi_lbl = st.selectbox("Select EMI to Pay", unpaid_options)
+            sel_emi_mo  = int(sel_emi_lbl.split("Month ")[1].split(" ")[0])
+            emi_row     = sched_df[sched_df["Month"] == sel_emi_mo].iloc[0]
+            total_due   = emi_row["EMI (₹)"] + emi_row["Late Fee (₹)"]
+
+            st.markdown(f"""
+            <div style='background:#001a33;border:1px solid #3399ff55;border-radius:14px;padding:14px 20px;margin:10px 0;'>
+            <div style='color:#66bbff;font-size:13px;'>
+            📅 Due Date: <b>{emi_row['Due Date']}</b> &nbsp;|&nbsp;
+            💰 EMI: <b>₹{emi_row['EMI (₹)']:,}</b> &nbsp;|&nbsp;
+            🔴 Late Fee: <b>₹{emi_row['Late Fee (₹)']:,}</b> &nbsp;|&nbsp;
+            💳 Total: <b style='color:#00ffe0;font-size:16px;'>₹{total_due:,.2f}</b>
+            </div></div>
+            """, unsafe_allow_html=True)
+
+            pay_method = st.radio("Payment Method", ["📱 UPI", "💳 Card", "🏦 Net Banking"], horizontal=True)
+
+            if pay_method == "📱 UPI":
+                upi_id = st.text_input("UPI ID", placeholder="yourname@upi")
+                pay_ready = bool(upi_id and "@" in upi_id)
+
+            elif pay_method == "💳 Card":
+                pc1, pc2 = st.columns(2)
+                card_num  = pc1.text_input("Card Number", max_chars=16, placeholder="16-digit number")
+                card_exp  = pc2.text_input("Expiry (MM/YY)", max_chars=5, placeholder="MM/YY")
+                card_cvv  = pc1.text_input("CVV", max_chars=3, type="password")
+                card_name = pc2.text_input("Name on Card")
+                pay_ready = len(card_num) == 16 and card_name and card_exp and card_cvv
+
+            else:  # Net Banking
+                nb_bank = st.selectbox("Select Bank", [
+                    "SBI", "HDFC", "ICICI", "Axis", "PNB",
+                    "Kotak", "Yes Bank", "IndusInd"
+                ])
+                nb_uid  = st.text_input("Net Banking User ID")
+                nb_pwd  = st.text_input("Password", type="password")
+                pay_ready = bool(nb_uid and nb_pwd)
+
+            if st.button("💸 Pay Now", key="pay_now_btn"):
+                with st.spinner("Processing payment..."):
+                    time.sleep(1.5)
+
+                txn_id = "TXN" + hashlib.md5(
+                    (st.session_state.username + str(sel_emi_mo) + str(time.time())).encode()
+                ).hexdigest()[:12].upper()
+
+                pay_record = {
+                    "Username":       st.session_state.username,
+                    "Loan_Index":     sel_idx,
+                    "Month":          sel_emi_mo,
+                    "Due_Date":       emi_row["Due Date"],
+                    "Paid_Date":      datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "Principal":      emi_row["Principal (₹)"],
+                    "Interest":       emi_row["Interest (₹)"],
+                    "EMI_Amount":     emi_row["EMI (₹)"],
+                    "Late_Fee":       emi_row["Late Fee (₹)"],
+                    "Total_Paid":     total_due,
+                    "Payment_Method": pay_method,
+                    "Transaction_ID": txn_id,
+                    "Status":         "Success"
+                }
+                cur_pays = load_payments()
+                cur_pays = pd.concat([cur_pays, pd.DataFrame([pay_record])], ignore_index=True)
+                cur_pays.to_csv(PAYMENTS_FILE, index=False)
+
+                # check if all EMIs paid → close loan
+                paid_now = set(cur_pays[(cur_pays["Username"] == st.session_state.username) &
+                                        (cur_pays["Loan_Index"] == sel_idx)]["Month"].astype(int).tolist())
+                if len(paid_now) >= int(t):
+                    loans_df_upd = pd.read_csv(LOANS_FILE)
+                    loans_df_upd.at[sel_idx, "Loan Status"]     = "Closed"
+                    loans_df_upd.at[sel_idx, "Lifecycle Stage"] = "Loan Closed"
+                    loans_df_upd.to_csv(LOANS_FILE, index=False)
+
+                st.session_state.last_receipt = pay_record
+                st.success("✅ Payment Successful!")
+                st.rerun()
+        else:
+            st.success("🎉 All EMIs for this loan are paid!")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # ---- PAYMENT RECEIPT ----
+        if st.session_state.last_receipt:
+            rc = st.session_state.last_receipt
+            st.markdown('<div class="receipt-card">', unsafe_allow_html=True)
+            st.markdown("""<h3 style='color:#00ff88!important;text-shadow:0 0 15px #00ff44;
+            text-align:center;letter-spacing:3px;'>🧾 PAYMENT RECEIPT</h3>""", unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;color:#00ff88;font-size:13px;'>
+            <div>🔢 Transaction ID</div><div><b>{rc['Transaction_ID']}</b></div>
+            <div>📅 Paid Date</div><div><b>{rc['Paid_Date']}</b></div>
+            <div>📆 EMI Month</div><div><b>{rc['Month']}</b></div>
+            <div>💰 EMI Amount</div><div><b>₹ {rc['EMI_Amount']:,}</b></div>
+            <div>🔴 Late Fee</div><div><b>₹ {rc['Late_Fee']:,}</b></div>
+            <div>💳 Total Paid</div><div><b style='color:#00ffe0;font-size:16px;'>₹ {rc['Total_Paid']:,}</b></div>
+            <div>🏦 Method</div><div><b>{rc['Payment_Method']}</b></div>
+            <div>✅ Status</div><div><b style='color:#00ff88;'>SUCCESS</b></div>
+            </div>
+            """, unsafe_allow_html=True)
+            rpt_txt = f"""PAYMENT RECEIPT
+Transaction ID : {rc['Transaction_ID']}
+Paid Date      : {rc['Paid_Date']}
+EMI Month      : {rc['Month']}
+EMI Amount     : Rs. {rc['EMI_Amount']}
+Late Fee       : Rs. {rc['Late_Fee']}
+Total Paid     : Rs. {rc['Total_Paid']}
+Method         : {rc['Payment_Method']}
+Status         : SUCCESS
+"""
+            st.download_button("⬇ Download Receipt", rpt_txt,
+                               file_name=f"receipt_{rc['Transaction_ID']}.txt")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        # ---- PAYMENT HISTORY ----
+        st.markdown("### 📜 Payment History")
+        pay_df2 = load_payments()
+        hist = pay_df2[(pay_df2["Username"] == st.session_state.username) &
+                       (pay_df2["Loan_Index"] == sel_idx)]
+        if hist.empty:
+            st.info("No payments made yet for this loan.")
+        else:
+            show_cols = ["Month","Due_Date","Paid_Date","EMI_Amount","Late_Fee","Total_Paid","Payment_Method","Transaction_ID","Status"]
+            st.dataframe(hist[show_cols].sort_values("Month"), use_container_width=True)
+
+        # ---- FULL EMI SCHEDULE TABLE ----
+        st.markdown("### 📅 Full EMI Schedule")
+        st.dataframe(sched_df, use_container_width=True, height=320)
+
+    # =====================================================================
+    # PAGE: LOAN APPLICATION
+    # =====================================================================
+    elif menu == "🏠 Loan Application":
         st.title("⚡ bank loan approval prediction")
 
         # sidebar inputs
@@ -354,12 +838,26 @@ if st.session_state.login and st.session_state.role == "user":
         p_ltype  = st.selectbox("Loan Type", list(LOANS.keys()))
         p_cscore = st.slider("Credit Score", 300, 900, 700)
 
+        # EMI day selector
+        st.subheader("📅 EMI Preferences")
+        emi_day_sel = st.slider("Preferred EMI Due Day of Month", 1, 28, 5,
+                                help="Day of month when EMI will be deducted each month")
+        st.info(f"Your EMI will be deducted on day **{emi_day_sel}** of every month.")
+
         # document uploads
         st.subheader("📄 Documents")
         f_aad  = st.file_uploader("Aadhaar Card",    key="up_a")
         f_pan  = st.file_uploader("PAN Card",        key="up_p")
         f_cred = st.file_uploader("Credit Report",   key="up_c")
         f_bank = st.file_uploader("Bank Statement",  key="up_b")
+
+        # KYC status notice
+        kyc_rec = get_user_kyc(st.session_state.username)
+        kyc_ok  = kyc_rec is not None and str(kyc_rec.get("KYC_Status","")) == "Verified"
+        if kyc_ok:
+            st.success(f"✅ KYC Verified — Loan will be credited to {kyc_rec.get('Bank_Name','your bank')} A/c ending {str(kyc_rec.get('Account_Number',''))[-4:]}")
+        else:
+            st.warning("⚠️ KYC not completed. Complete KYC from the sidebar to enable disbursement.")
 
         # advanced popup
         if st.session_state.get("show_adv", False):
@@ -402,6 +900,11 @@ if st.session_state.login and st.session_state.role == "user":
 
             expl = str(get_explain_scores(feat_inputs, p_cscore, feat_inputs["Loan Amount"]))
 
+            # bank details from KYC
+            acc_n  = kyc_rec.get("Account_Number", "") if kyc_ok else ""
+            bnk_n  = kyc_rec.get("Bank_Name", "")      if kyc_ok else ""
+            ifc_c  = kyc_rec.get("IFSC_Code", "")      if kyc_ok else ""
+
             new_entry = {f: feat_inputs.get(f, None) for f in FEATURES}
             new_entry.update({
                 "Username": st.session_state.username,
@@ -413,10 +916,15 @@ if st.session_state.login and st.session_state.role == "user":
                 "EMI": emi_a, "Loan Type": p_ltype, "Loan Status": "Under Review",
                 "Credit Score": p_cscore,
                 "Applied Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "Last Updated":  datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "Last Updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "Lifecycle Stage": "Application Submitted",
                 "Approval Probability": appr_prob,
-                "Explainability": expl
+                "Explainability": expl,
+                "EMI_Day": emi_day_sel,
+                "Disbursement_Date": datetime.now().strftime("%Y-%m-%d"),
+                "Account_Number": acc_n,
+                "Bank_Name": bnk_n,
+                "IFSC_Code": ifc_c,
             })
             loans_df = pd.concat([loans_df, pd.DataFrame([new_entry])], ignore_index=True)
             loans_df.to_csv(LOANS_FILE, index=False)
@@ -468,22 +976,22 @@ if st.session_state.login and st.session_state.role == "user":
         cone_scores = np.array([np.random.randint(a,b) for a,b in [
             (60,95),(50,90),(40,85),(55,92),(60,98),(50,100),(5,40),(1,30),(60,95),(65,99)]])
 
-        hc, rc = 6, 4
+        hc, rc_v = 6, 4
         ta = np.linspace(0, 2*np.pi, 60)
         za = np.linspace(0, hc, 40)
         ta, za = np.meshgrid(ta, za)
-        Xc = (za/hc)*rc*np.cos(ta)
-        Yc = (za/hc)*rc*np.sin(ta)
-        gx, gy = np.meshgrid(np.linspace(-rc, rc, 20), np.linspace(-rc, rc, 20))
+        Xc = (za/hc)*rc_v*np.cos(ta)
+        Yc = (za/hc)*rc_v*np.sin(ta)
+        gx, gy = np.meshgrid(np.linspace(-rc_v, rc_v, 20), np.linspace(-rc_v, rc_v, 20))
 
         px_pts, py_pts, pz_pts = [], [], []
         for i in range(len(cone_lbls)):
-            t = i / (len(cone_lbls)-1)
-            rad = rc*(1-abs(t-0.5)*1.6)
-            ang = t*4*np.pi
+            t_ = i / (len(cone_lbls)-1)
+            rad = rc_v*(1-abs(t_-0.5)*1.6)
+            ang = t_*4*np.pi
             px_pts.append(np.cos(ang)*rad*0.8)
             py_pts.append(np.sin(ang)*rad*0.8)
-            pz_pts.append((t-0.5)*8)
+            pz_pts.append((t_-0.5)*8)
 
         fig_cone = go.Figure()
         fig_cone.add_trace(go.Surface(x=Xc, y=Yc, z=za,  colorscale=[[0,"#00eaff"],[1,"#007bff"]], opacity=0.85, showscale=False))
@@ -544,6 +1052,10 @@ if st.session_state.login and st.session_state.role == "user":
                     <div style='font-size:10px;color:#cc88ff;letter-spacing:2px;'>💳 LOAN TYPE</div>
                     <div style='font-size:16px;color:#cc88ff;font-weight:bold;'>{p_ltype}</div>
                 </div>
+                <div style='background:#00ff8811;border:1px solid #00ff8844;border-radius:14px;padding:14px 22px;text-align:center;min-width:130px;'>
+                    <div style='font-size:10px;color:#88ffcc;letter-spacing:2px;'>📅 EMI DUE DAY</div>
+                    <div style='font-size:18px;color:#00ff88;font-weight:bold;'>Day {emi_day_sel}</div>
+                </div>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -563,19 +1075,11 @@ if st.session_state.login and st.session_state.role == "user":
                     colorscale=[[0,"#ff3366"],[0.5,"#ffff00"],[1,"#00ff88"]],
                     cmin=0, cmax=1,
                     colorbar=dict(
-                        title=dict(
-                            text="Impact",
-                            font=dict(color="#ff88ff")
-                        ),
+                        title=dict(text="Impact", font=dict(color="#ff88ff")),
                         tickfont=dict(color="#ff88ff")
                     )
                 )
             ))
-            
-        text=[f"{v*100:.1f}%" for v in expl_vals],
-        textposition='outside',
-        textfont=dict(color="#ff88ff"),
-        
         fig_bar.update_layout(
             paper_bgcolor="#1a0020", plot_bgcolor="#1a0020",
             font=dict(color="#ff88ff", family="Orbitron"),
@@ -592,7 +1096,6 @@ if st.session_state.login and st.session_state.role == "user":
         )
         st.plotly_chart(fig_bar, use_container_width=True, key="expl_bar")
 
-        # radar
         fig_rad = go.Figure(go.Scatterpolar(
             r=expl_vals + [expl_vals[0]],
             theta=expl_keys + [expl_keys[0]],
@@ -637,7 +1140,6 @@ if st.session_state.login and st.session_state.role == "user":
 
         hc1, hc2 = st.columns(2)
 
-        # risk matrix heatmap
         cs_bands = ["300-450","450-600","600-700","700-800","800-900"]
         la_bands = ["<1L","1-5L","5-15L","15-50L","50L+"]
         risk_mat = np.array([
@@ -654,13 +1156,8 @@ if st.session_state.login and st.session_state.role == "user":
             texttemplate="%{text}",
             textfont=dict(color="white", family="Orbitron", size=12),
             showscale=True,
-        colorbar=dict(
-        title=dict(
-            text="Something",
-            font=dict(color="#ff8800")
-        ),
-        tickfont=dict(color="#ff8800")
-        )
+            colorbar=dict(title=dict(text="Risk%", font=dict(color="#ff8800")),
+                          tickfont=dict(color="#ff8800"))
         ))
         cs_i = min(int((p_cscore - 300) / 120), 4)
         la_i = 0 if l_amt < 100000 else 1 if l_amt < 500000 else 2 if l_amt < 1500000 else 3 if l_amt < 5000000 else 4
@@ -680,7 +1177,6 @@ if st.session_state.login and st.session_state.role == "user":
         )
         hc1.plotly_chart(fig_hm1, use_container_width=True, key="hm_risk")
 
-        # approval probability heatmap
         dti_b = ["DTI<20%","20-30%","30-40%","40-50%","50%+"]
         inc_b = ["<20K","20-50K","50-100K","100-200K","200K+"]
         appr_mat = np.array([
@@ -697,13 +1193,8 @@ if st.session_state.login and st.session_state.role == "user":
             texttemplate="%{text}",
             textfont=dict(color="white", family="Orbitron", size=12),
             showscale=True,
-        colorbar=dict(
-        title=dict(
-            text="Something",
-            font=dict(color="#ff8800")
-        ),
-        tickfont=dict(color="#ff8800")
-        )
+            colorbar=dict(title=dict(text="Approval%", font=dict(color="#ff8800")),
+                          tickfont=dict(color="#ff8800"))
         ))
         fig_hm2.update_layout(
             paper_bgcolor="#1a0800", plot_bgcolor="#1a0800",
@@ -716,7 +1207,6 @@ if st.session_state.login and st.session_state.role == "user":
         )
         hc2.plotly_chart(fig_hm2, use_container_width=True, key="hm_appr")
 
-        # correlation heatmap full width
         hm_cols = [
             "Applicant Income","Coapplicant Income","Loan Amount","Credit History",
             "Total Income","Loan-to-Income Ratio","DTI Ratio","Credit Score"
@@ -735,14 +1225,10 @@ if st.session_state.login and st.session_state.role == "user":
         corr_mat = corr_df.corr().values
 
         fig_hm3 = go.Figure(go.Heatmap(
-        z=corr_mat, 
-        x=hm_cols, 
-        y=hm_cols,
-        colorscale="Viridis",
-        colorbar=dict(
-            title=dict(text="Correlation", font=dict(color="#ff8800")),
-            tickfont=dict(color="#ff8800")
-        )
+            z=corr_mat, x=hm_cols, y=hm_cols,
+            colorscale="Viridis",
+            colorbar=dict(title=dict(text="Correlation", font=dict(color="#ff8800")),
+                          tickfont=dict(color="#ff8800"))
         ))
         fig_hm3.update_layout(
             paper_bgcolor="#1a0800", plot_bgcolor="#1a0800",
@@ -764,19 +1250,22 @@ if st.session_state.login and st.session_state.role == "user":
 
         bal_run = l_amt
         emi_rows = []
+        due_dates_now = get_emi_due_dates(datetime.now().strftime("%Y-%m-%d"), emi_day_sel, int(ten_now))
         for mo in range(1, int(ten_now)+1):
             int_part = bal_run * r_now
             pri_part = emi_now - int_part
             bal_run -= pri_part
+            due = due_dates_now[mo-1]
             emi_rows.append({
                 "Month":         mo,
+                "Due Date":      due.strftime("%Y-%m-%d"),
                 "EMI (₹)":       round(emi_now, 2),
                 "Principal (₹)": round(pri_part, 2),
                 "Interest (₹)":  round(int_part, 2),
                 "Balance (₹)":   round(max(bal_run, 0), 2)
             })
-        sched_df = pd.DataFrame(emi_rows)
-        st.dataframe(sched_df, use_container_width=True, height=320)
+        sched_df2 = pd.DataFrame(emi_rows)
+        st.dataframe(sched_df2, use_container_width=True, height=320)
         st.markdown('</div>', unsafe_allow_html=True)
 
         # =================== 6 ANALYTICS CHARTS ===================
@@ -1039,25 +1528,22 @@ if st.session_state.login and st.session_state.role == "user":
                     st.error("❌ HIGH RISK — LOAN NOT RECOMMENDED")
 
                 st.markdown('</div>', unsafe_allow_html=True)
-    elif menu == "📄 Loan Details (Real Bank View)":
 
-        # ================= 🔮 CYBER STYLE (LOCAL ONLY) =================
+    # =====================================================================
+    # PAGE: LOAN DETAILS (REAL BANK VIEW)
+    # =====================================================================
+    elif menu == "📄 Loan Details (Real Bank View)":
         st.markdown("""
         <style>
         .cyber-header {
             background: linear-gradient(135deg,#050d1a,#0a1f44);
-            padding:25px;
-            border-radius:20px;
-            color:#00ffe0;
+            padding:25px; border-radius:20px; color:#00ffe0;
             box-shadow:0 0 20px rgba(0,255,224,0.3);
         }
-
         .cyber-metric {
             background: rgba(0,255,224,0.05);
             border:1px solid rgba(0,255,224,0.2);
-            border-radius:15px;
-            padding:10px;
-            text-align:center;
+            border-radius:15px; padding:10px; text-align:center;
             box-shadow:0 0 10px #00ffe0;
         }
         </style>
@@ -1065,7 +1551,11 @@ if st.session_state.login and st.session_state.role == "user":
 
         st.markdown("<h1 style='color:#00ffe0'>🏦 Loan Dashboard — Cyber Banking View</h1>", unsafe_allow_html=True)
 
-        # ================= USER DATA =================
+        loans_df = pd.read_csv(LOANS_FILE)
+        for c in ALL_COLS:
+            if c not in loans_df.columns:
+                loans_df[c] = None
+
         user_loans = loans_df[loans_df["Username"] == st.session_state.username]
 
         if user_loans.empty:
@@ -1074,7 +1564,14 @@ if st.session_state.login and st.session_state.role == "user":
 
         latest = user_loans.iloc[-1]
 
-        # ================= HEADER =================
+        # KYC status
+        kyc_rec2 = get_user_kyc(st.session_state.username)
+        if kyc_rec2 is not None and str(kyc_rec2.get("KYC_Status","")) == "Verified":
+            st.success(f"✅ KYC Verified | Bank: {kyc_rec2.get('Bank_Name','N/A')} | A/c: {'*'*8+str(kyc_rec2.get('Account_Number',''))[-4:]}")
+        else:
+            st.warning("⚠️ KYC Pending — Go to KYC Verification to complete it.")
+
+        # header
         st.markdown(f"""
         <div class="cyber-header">
         <h2>👤 {latest['Name']}</h2>
@@ -1082,68 +1579,92 @@ if st.session_state.login and st.session_state.role == "user":
         </div>
         """, unsafe_allow_html=True)
 
-        # ================= MAIN METRICS =================
+        # main metrics
         c1, c2, c3, c4 = st.columns(4)
+        try:
+            la_v = f"₹ {float(latest['Loan Amount']):,}"
+        except:
+            la_v = str(latest['Loan Amount'])
+        try:
+            emi_v = f"₹ {float(latest['EMI']):,}"
+        except:
+            emi_v = str(latest['EMI'])
 
-        c1.markdown(f"<div class='cyber-metric'>💰 Loan<br>₹ {latest['Loan Amount']:,}</div>", unsafe_allow_html=True)
-        c2.markdown(f"<div class='cyber-metric'>📆 EMI<br>₹ {latest['EMI']}</div>", unsafe_allow_html=True)
+        c1.markdown(f"<div class='cyber-metric'>💰 Loan<br>{la_v}</div>", unsafe_allow_html=True)
+        c2.markdown(f"<div class='cyber-metric'>📆 EMI<br>{emi_v}</div>", unsafe_allow_html=True)
         c3.markdown(f"<div class='cyber-metric'>📊 Score<br>{latest['Credit Score']}</div>", unsafe_allow_html=True)
         c4.markdown(f"<div class='cyber-metric'>🎯 Approval<br>{latest['Approval Probability']}%</div>", unsafe_allow_html=True)
 
-        # ================= AI DECISION =================
+        # bank account info
+        if latest.get("Account_Number"):
+            st.markdown(f"""
+            <div style='background:#001a33;border:1px solid #3399ff55;border-radius:14px;padding:14px 20px;margin:10px 0;'>
+            <div style='color:#66bbff;font-size:13px;'>
+            🏦 <b>Disbursement Bank:</b> {latest.get('Bank_Name','N/A')} &nbsp;|&nbsp;
+            💳 <b>A/c:</b> {'*'*8+str(latest.get('Account_Number',''))[-4:]} &nbsp;|&nbsp;
+            🔑 <b>IFSC:</b> {latest.get('IFSC_Code','N/A')}
+            </div></div>
+            """, unsafe_allow_html=True)
+
+        # AI decision
         st.markdown("## 🤖 AI Decision")
         st.info(f"Risk Level: {latest['Risk']}")
         st.info(f"Fraud Check: {'⚠️ Risk' if latest['Fraud'] else 'Safe ✅'}")
 
-        # ================= TIMELINE =================
+        # timeline
         st.markdown("## 🧬 Loan Timeline")
-
-        progress = int(latest["Approval Probability"])
+        try:
+            progress = int(float(latest["Approval Probability"]))
+        except:
+            progress = 0
         st.progress(progress)
 
         steps = ["Application", "Verification", "Credit Check", "Risk Analysis", "Approval"]
-
         for i, step in enumerate(steps):
             if i < progress // 20:
                 st.success(f"✔ {step}")
             else:
                 st.info(f"⏳ {step}")
 
-        # ================= EMI SCHEDULE =================
+        # EMI schedule
         st.markdown("## 💰 EMI Schedule")
+        try:
+            loan_amt = float(latest["Loan Amount"])
+            emi_v2   = float(latest["EMI"])
+        except:
+            loan_amt = 0.0
+            emi_v2   = 0.0
 
-        loan_amt = float(latest["Loan Amount"])
-        emi = float(latest["EMI"])
-        rate = 0.1 / 12
-        months = 12
+        lt2 = str(latest.get("Loan Type","Personal Loan"))
+        rate2, t2 = LOANS.get(lt2, (0.10, 12))
+        emi_day2  = int(latest.get("EMI_Day", 5) or 5)
+        disb2     = str(latest.get("Disbursement_Date", latest.get("Applied Date", datetime.now().strftime("%Y-%m-%d"))) or datetime.now().strftime("%Y-%m-%d"))
+        due_dates2 = get_emi_due_dates(disb2, emi_day2, int(t2))
 
-        balance = loan_amt
-        schedule = []
+        balance2  = loan_amt
+        r2_mo     = rate2 / 12
+        schedule2 = []
+        for m in range(1, min(int(t2), 13)+1):
+            interest2  = balance2 * r2_mo
+            principal2 = emi_v2 - interest2
+            balance2  -= principal2
+            due2 = due_dates2[m-1]
+            schedule2.append([m, due2.strftime("%Y-%m-%d"),
+                               round(principal2,2), round(interest2,2), round(max(balance2,0),2)])
 
-        for m in range(1, months+1):
-            interest = balance * rate
-            principal = emi - interest
-            balance -= principal
-            schedule.append([m, round(principal,2), round(interest,2), round(balance,2)])
-
-        df_schedule = pd.DataFrame(schedule, columns=["Month","Principal","Interest","Balance"])
+        df_schedule = pd.DataFrame(schedule2, columns=["Month","Due Date","Principal","Interest","Balance"])
         st.dataframe(df_schedule, use_container_width=True)
 
-        # ================= CYBER THEME FUNCTION =================
-        def cyber_theme(fig):
-            fig.update_layout(
-                paper_bgcolor="#050d1a",
-                plot_bgcolor="#050d1a",
-                font=dict(color="#00ffe0"),
-            )
-            return fig
-
-        # ================= CREDIT SCORE GAUGE =================
+        # credit score gauge
         st.markdown("## 📊 Credit Score")
+        try:
+            cscore_v = float(latest["Credit Score"])
+        except:
+            cscore_v = 600.0
 
         fig_gauge = go.Figure(go.Indicator(
             mode="gauge+number",
-            value=latest["Credit Score"],
+            value=cscore_v,
             title={'text': "Score"},
             gauge={
                 'axis': {'range': [300, 900], 'tickcolor': "#00ffe0"},
@@ -1157,165 +1678,123 @@ if st.session_state.login and st.session_state.role == "user":
         ))
         st.plotly_chart(cyber_theme(fig_gauge), use_container_width=True)
 
-        # ================= CHARTS =================
+        # charts
         st.markdown("## 📈 Financial Analytics (Advanced)")
 
-        # ================= CYBER THEME (STRONG VISIBILITY) =================
-        def cyber_theme(fig):
-            fig.update_layout(
-                paper_bgcolor="#050d1a",
-                plot_bgcolor="#050d1a",
-                font=dict(color="#00ffe0", size=12),
-
-                xaxis=dict(
-                    showgrid=True,
-                    gridcolor="rgba(0,255,224,0.2)",
-                    zeroline=False,
-                    color="#00ffe0"
-                ),
-                yaxis=dict(
-                    showgrid=True,
-                    gridcolor="rgba(0,255,224,0.2)",
-                    zeroline=False,
-                    color="#00ffe0"
-                ),
-
-                legend=dict(
-                    font=dict(color="#00ffe0")
-                )
-            )
-            return fig
-
-
-        # ================= 1. EMI BREAKDOWN =================
         st.markdown("### 💰 EMI Breakdown (Principal vs Interest)")
+        fig_bar_b = go.Figure()
+        fig_bar_b.add_bar(name="Principal", x=df_schedule["Month"],
+                          y=df_schedule["Principal"], marker=dict(color="#00ffe0"))
+        fig_bar_b.add_bar(name="Interest",  x=df_schedule["Month"],
+                          y=df_schedule["Interest"],  marker=dict(color="#ff007f"))
+        fig_bar_b.update_layout(barmode='stack', title="Monthly EMI Split")
+        st.plotly_chart(cyber_theme(fig_bar_b), use_container_width=True)
 
-        fig_bar = go.Figure()
-
-        fig_bar.add_bar(
-            name="Principal",
-            x=df_schedule["Month"],
-            y=df_schedule["Principal"],
-            marker=dict(color="#00ffe0")
-        )
-
-        fig_bar.add_bar(
-            name="Interest",
-            x=df_schedule["Month"],
-            y=df_schedule["Interest"],
-            marker=dict(color="#ff007f")
-        )
-
-        fig_bar.update_layout(
-            barmode='stack',
-            title="Monthly EMI Split"
-        )
-
-        st.plotly_chart(cyber_theme(fig_bar), use_container_width=True)
-
-
-        # ================= 2. LOAN BALANCE TREND =================
         st.markdown("### 📉 Loan Balance Trend")
-
         fig_line = go.Figure()
-
         fig_line.add_trace(go.Scatter(
-            x=df_schedule["Month"],
-            y=df_schedule["Balance"],
-            mode='lines+markers',
-            name="Remaining Balance",
-            line=dict(color="#00ffe0", width=3),
-            marker=dict(size=6)
+            x=df_schedule["Month"], y=df_schedule["Balance"],
+            mode='lines+markers', name="Remaining Balance",
+            line=dict(color="#00ffe0", width=3), marker=dict(size=6)
         ))
-
         fig_line.update_layout(title="Loan Balance Over Time")
-
         st.plotly_chart(cyber_theme(fig_line), use_container_width=True)
 
-
-        # ================= 3. RISK COMPONENT ANALYSIS =================
         st.markdown("### ⚠️ Risk Component Analysis")
+        try:
+            app_inc_v = float(latest["Applicant Income"])
+        except:
+            app_inc_v = 0.0
 
         risk_values = [
-            latest["Credit Score"]/900 * 100,
-            latest["Applicant Income"]/200000 * 100,
-            latest["Approval Probability"]
+            cscore_v / 900 * 100,
+            min(app_inc_v / 200000 * 100, 100),
+            float(latest["Approval Probability"] or 0)
         ]
-
         risk_labels = ["Credit Strength", "Income Strength", "Approval"]
-
         fig_risk = go.Figure()
-
         fig_risk.add_trace(go.Bar(
-            x=risk_labels,
-            y=risk_values,
-            marker=dict(color=["#00ffe0", "#ffaa00", "#ff007f"]),
-            text=[f"{v:.1f}%" for v in risk_values],
-            textposition='outside'
+            x=risk_labels, y=risk_values,
+            marker=dict(color=["#00ffe0","#ffaa00","#ff007f"]),
+            text=[f"{v:.1f}%" for v in risk_values], textposition='outside'
         ))
-
         fig_risk.update_layout(title="Risk Component Scores")
-
         st.plotly_chart(cyber_theme(fig_risk), use_container_width=True)
 
-
-        # ================= 4. INCOME vs OBLIGATION =================
         st.markdown("### 💼 Income vs Loan Burden")
-
         fig_compare = go.Figure()
-
         fig_compare.add_bar(
             x=["Income", "EMI"],
-            y=[latest["Applicant Income"], latest["EMI"]],
-            marker=dict(color=["#00ffe0", "#ff007f"])
+            y=[app_inc_v, emi_v2],
+            marker=dict(color=["#00ffe0","#ff007f"])
         )
-
         fig_compare.update_layout(title="Income vs EMI Comparison")
-
         st.plotly_chart(cyber_theme(fig_compare), use_container_width=True)
 
-        # ================= LOAN SIMULATOR =================
+        # loan simulator
         st.markdown("## 🧠 Loan Simulator")
-
-        sim_income = st.slider("Adjust Income", 10000, 200000, int(latest["Applicant Income"]))
-        sim_score = st.slider("Adjust Credit Score", 300, 900, int(latest["Credit Score"]))
-
-        sim_prob = min(100,
-            (sim_score - 300)/600*50 +
-            (sim_income/200000)*50
-        )
-
+        sim_income = st.slider("Adjust Income", 10000, 200000, int(app_inc_v) if app_inc_v else 50000)
+        sim_score  = st.slider("Adjust Credit Score", 300, 900, int(cscore_v))
+        sim_prob = min(100, (sim_score - 300)/600*50 + (sim_income/200000)*50)
         st.progress(int(sim_prob))
         st.write(f"⚡ New Approval Probability: {sim_prob:.1f}%")
 
-        # ================= PAYMENT SIMULATION =================
+        # payment simulation
         st.markdown("## 💳 Payment Simulation")
+        pay_sim = st.number_input("Enter Payment Amount", 0, int(loan_amt) if loan_amt else 1000000, 0)
+        remaining_sim = loan_amt - pay_sim
+        st.markdown(f"<div class='cyber-metric'>Remaining Balance: ₹ {remaining_sim:,.2f}</div>", unsafe_allow_html=True)
 
-        pay = st.number_input("Enter Payment Amount", 0, int(latest["Loan Amount"]), 0)
-        remaining = latest["Loan Amount"] - pay
-
-        st.markdown(f"<div class='cyber-metric'>Remaining Balance: ₹ {remaining}</div>", unsafe_allow_html=True)
-
-        # ================= DOWNLOAD =================
+        # download report
         st.markdown("## 📄 Loan Report")
+        kyc_info = ""
+        if kyc_rec2 is not None:
+            kyc_info = f"""
+KYC Status     : {kyc_rec2.get('KYC_Status','N/A')}
+Phone          : {kyc_rec2.get('Phone','N/A')}
+Bank           : {kyc_rec2.get('Bank_Name','N/A')}
+IFSC           : {kyc_rec2.get('IFSC_Code','N/A')}
+Account        : {'*'*8+str(kyc_rec2.get('Account_Number',''))[-4:]}"""
 
         report = f"""
-        Loan Report
-        Name: {latest['Name']}
-        Loan Amount: {latest['Loan Amount']}
-        EMI: {latest['EMI']}
-        Risk: {latest['Risk']}
-        Approval: {latest['Approval Probability']}%
-        """
-
+LOAN REPORT
+===========
+Name           : {latest['Name']}
+Loan Type      : {latest['Loan Type']}
+Loan Amount    : {latest['Loan Amount']}
+EMI            : {latest['EMI']}
+EMI Due Day    : {latest.get('EMI_Day','N/A')}
+Risk           : {latest['Risk']}
+Credit Score   : {latest['Credit Score']}
+Approval       : {latest['Approval Probability']}%
+Status         : {latest['Loan Status']}
+Applied Date   : {latest['Applied Date']}
+{kyc_info}
+"""
         st.download_button("⬇ Download Report", report, file_name="loan_report.txt")
 
-        # ================= FINAL DECISION =================
-        st.markdown("---")
+        # payment summary
+        st.markdown("## 💳 Payment Summary")
+        pay_df3 = load_payments()
+        u_pays  = pay_df3[pay_df3["Username"] == st.session_state.username]
+        if not u_pays.empty:
+            total_paid_amt = u_pays["Total_Paid"].astype(float).sum()
+            st.metric("💰 Total Amount Paid", f"₹ {total_paid_amt:,.2f}")
+            st.dataframe(u_pays[["Month","Paid_Date","Total_Paid","Payment_Method","Transaction_ID","Status"]],
+                         use_container_width=True)
+        else:
+            st.info("No payments recorded yet. Go to EMI Payment Center to make payments.")
 
-        if latest["Approval Probability"] > 70:
+        # final decision
+        st.markdown("---")
+        try:
+            ap_v = float(latest["Approval Probability"])
+        except:
+            ap_v = 0.0
+
+        if ap_v > 70:
             st.success("✅ LOAN APPROVED")
-        elif latest["Approval Probability"] > 40:
+        elif ap_v > 40:
             st.warning("⚠️ UNDER REVIEW")
         else:
             st.error("❌ LOAN REJECTED")
@@ -1324,39 +1803,65 @@ if st.session_state.login and st.session_state.role == "user":
 if st.session_state.login and st.session_state.role == "admin":
     st.title("🛠 Admin Dashboard")
 
-    loans_df = pd.read_csv(LOANS_FILE)
-    for c in ALL_COLS:
-        if c not in loans_df.columns:
-            loans_df[c] = None
+    admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📋 Loan Applications", "🔐 KYC Records", "💳 Payment Records"])
 
-    st.dataframe(loans_df, use_container_width=True)
-    st.subheader("📄 User Documents")
+    with admin_tab1:
+        loans_df = pd.read_csv(LOANS_FILE)
+        for c in ALL_COLS:
+            if c not in loans_df.columns:
+                loans_df[c] = None
 
-    show = [c for c in ["Name","Aadhaar","PAN","CreditFile","BankFile",
-                         "Loan Status","Lifecycle Stage","Approval Probability"]
-            if c in loans_df.columns]
-    st.write(loans_df[show])
+        st.dataframe(loans_df, use_container_width=True)
+        st.subheader("📄 User Documents")
 
-    for i in loans_df.index:
-        a1, a2, a3 = st.columns(3)
-        if a1.button(f"✅ Approve #{i}", key=f"apr_{i}"):
-            loans_df.at[i, "Loan Status"]     = "Approved"
-            loans_df.at[i, "Lifecycle Stage"] = "Final Approval"
-            loans_df.at[i, "Last Updated"]    = datetime.now().strftime("%Y-%m-%d %H:%M")
-            loans_df.to_csv(LOANS_FILE, index=False)
-            st.success(f"Application #{i} approved ✅")
-            st.rerun()
-        if a2.button(f"❌ Reject #{i}", key=f"rej_{i}"):
-            loans_df.at[i, "Loan Status"]     = "Rejected"
-            loans_df.at[i, "Lifecycle Stage"] = "Credit Bureau Check"
-            loans_df.at[i, "Last Updated"]    = datetime.now().strftime("%Y-%m-%d %H:%M")
-            loans_df.to_csv(LOANS_FILE, index=False)
-            st.error(f"Application #{i} rejected ❌")
-            st.rerun()
-        if a3.button(f"💰 Disburse #{i}", key=f"dis_{i}"):
-            loans_df.at[i, "Loan Status"]     = "Disbursed"
-            loans_df.at[i, "Lifecycle Stage"] = "Loan Disbursement"
-            loans_df.at[i, "Last Updated"]    = datetime.now().strftime("%Y-%m-%d %H:%M")
-            loans_df.to_csv(LOANS_FILE, index=False)
-            st.success(f"Application #{i} disbursed 💰")
-            st.rerun()
+        show = [c for c in ["Name","Username","Aadhaar","PAN","CreditFile","BankFile",
+                             "Loan Status","Lifecycle Stage","Approval Probability",
+                             "Account_Number","Bank_Name","IFSC_Code","EMI_Day"]
+                if c in loans_df.columns]
+        st.write(loans_df[show])
+
+        for i in loans_df.index:
+            a1, a2, a3 = st.columns(3)
+            if a1.button(f"✅ Approve #{i}", key=f"apr_{i}"):
+                loans_df.at[i, "Loan Status"]     = "Approved"
+                loans_df.at[i, "Lifecycle Stage"] = "Final Approval"
+                loans_df.at[i, "Last Updated"]    = datetime.now().strftime("%Y-%m-%d %H:%M")
+                loans_df.to_csv(LOANS_FILE, index=False)
+                st.success(f"Application #{i} approved ✅")
+                st.rerun()
+            if a2.button(f"❌ Reject #{i}", key=f"rej_{i}"):
+                loans_df.at[i, "Loan Status"]     = "Rejected"
+                loans_df.at[i, "Lifecycle Stage"] = "Credit Bureau Check"
+                loans_df.at[i, "Last Updated"]    = datetime.now().strftime("%Y-%m-%d %H:%M")
+                loans_df.to_csv(LOANS_FILE, index=False)
+                st.error(f"Application #{i} rejected ❌")
+                st.rerun()
+            if a3.button(f"💰 Disburse #{i}", key=f"dis_{i}"):
+                loans_df.at[i, "Loan Status"]        = "Disbursed"
+                loans_df.at[i, "Lifecycle Stage"]    = "Loan Disbursement"
+                loans_df.at[i, "Disbursement_Date"]  = datetime.now().strftime("%Y-%m-%d")
+                loans_df.at[i, "Last Updated"]       = datetime.now().strftime("%Y-%m-%d %H:%M")
+                loans_df.to_csv(LOANS_FILE, index=False)
+                st.success(f"Application #{i} disbursed 💰")
+                st.rerun()
+
+    with admin_tab2:
+        st.subheader("🔐 KYC Verification Records")
+        kyc_df_admin = load_kyc()
+        if kyc_df_admin.empty:
+            st.info("No KYC records yet.")
+        else:
+            st.dataframe(kyc_df_admin[["Username","Phone","OTP_Verified","Bank_Name",
+                                        "IFSC_Code","KYC_Status","Verified_At"]],
+                         use_container_width=True)
+
+    with admin_tab3:
+        st.subheader("💳 All Payment Records")
+        pay_df_admin = load_payments()
+        if pay_df_admin.empty:
+            st.info("No payment records yet.")
+        else:
+            st.dataframe(pay_df_admin, use_container_width=True)
+            total_col = pay_df_admin["Total_Paid"].astype(float)
+            st.metric("💰 Total Collections", f"₹ {total_col.sum():,.2f}")
+            st.metric("✅ Successful Transactions", str(len(pay_df_admin[pay_df_admin["Status"]=="Success"])))
